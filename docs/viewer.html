@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screencast — Viewer</title>
+<link rel="stylesheet" href="style.css">
+<meta name="theme-color" content="#0b0d10">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand"><span class="dot" id="dot"></span><b>SCREENCAST</b> · viewer</div>
+    <div class="status" id="wsStatus">connecting…</div>
+  </div>
+
+  <main>
+    <div class="config" id="configRow" style="display:none;">
+      <label for="signalUrl">Signaling server</label>
+      <input id="signalUrl" type="text" placeholder="wss://your-app.onrender.com" autocomplete="off">
+      <button id="saveUrlBtn" class="secondary">Connect</button>
+    </div>
+
+    <div class="stage">
+      <video id="remote" autoplay playsinline></video>
+      <div class="placeholder" id="placeholder">Waiting for the host to start sharing…</div>
+    </div>
+    <div class="footer-note">
+      You're watching a live local screen share. Nothing was installed —
+      this is just a browser tab.
+    </div>
+  </main>
+
+<script>
+const dot = document.getElementById('dot');
+const wsStatus = document.getElementById('wsStatus');
+const remote = document.getElementById('remote');
+const placeholder = document.getElementById('placeholder');
+
+let ws;
+let pc;
+
+const STORAGE_KEY = 'screencast:signalUrl';
+const configRow = document.getElementById('configRow');
+const signalUrlInput = document.getElementById('signalUrl');
+const saveUrlBtn = document.getElementById('saveUrlBtn');
+
+function resolveSignalUrl() {
+  const fromQuery = new URLSearchParams(location.search).get('signal');
+  if (fromQuery) {
+    try { localStorage.setItem(STORAGE_KEY, fromQuery); } catch {}
+    return fromQuery;
+  }
+  try { return localStorage.getItem(STORAGE_KEY) || ''; } catch { return ''; }
+}
+
+signalUrlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') saveUrlBtn.click();
+});
+saveUrlBtn.addEventListener('click', () => {
+  const url = signalUrlInput.value.trim();
+  if (!url) return;
+  try { localStorage.setItem(STORAGE_KEY, url); } catch {}
+  configRow.style.display = 'none';
+  connectWS();
+});
+
+function setDot(state) {
+  dot.className = 'dot' + (state === 'live' ? ' live' : state === 'wait' ? ' wait' : '');
+}
+
+function connectWS() {
+  const url = resolveSignalUrl();
+  if (!url) {
+    configRow.style.display = 'flex';
+    wsStatus.textContent = 'ask the host for their signaling server link';
+    setDot('off');
+    return;
+  }
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    wsStatus.textContent = 'signaling connected';
+    ws.send(JSON.stringify({ type: 'register-viewer' }));
+  };
+  ws.onclose = () => {
+    if (!resolveSignalUrl()) return;
+    wsStatus.textContent = 'signaling disconnected — retrying…';
+    setDot('off');
+    setTimeout(connectWS, 1500);
+  };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === 'viewer-id') {
+      setDot(msg.hostOnline ? 'wait' : 'off');
+      wsStatus.textContent = msg.hostOnline ? 'waiting for stream…' : 'no host broadcasting yet';
+    } else if (msg.type === 'offer') {
+      await handleOffer(msg.offer);
+    } else if (msg.type === 'ice-candidate') {
+      if (pc && msg.candidate) {
+        try { await pc.addIceCandidate(msg.candidate); } catch (e) { console.warn(e); }
+      }
+    } else if (msg.type === 'host-left') {
+      teardown();
+    }
+  };
+}
+
+async function handleOffer(offer) {
+  teardown();
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  pc.ontrack = (e) => {
+    remote.srcObject = e.streams[0];
+    placeholder.style.display = 'none';
+    setDot('live');
+    wsStatus.textContent = 'live';
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+      teardown();
+    }
+  };
+
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({ type: 'answer', answer }));
+}
+
+function teardown() {
+  if (pc) { pc.close(); pc = null; }
+  remote.srcObject = null;
+  placeholder.style.display = 'block';
+  placeholder.textContent = 'Waiting for the host to start sharing…';
+  setDot('wait');
+  wsStatus.textContent = 'waiting for stream…';
+}
+
+setDot('off');
+connectWS();
+</script>
+</body>
+</html>

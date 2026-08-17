@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screencast — Broadcast</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+<meta name="theme-color" content="#0b0d10">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand"><span class="dot" id="dot"></span><b>SCREENCAST</b> · broadcast</div>
+    <div class="status" id="wsStatus">connecting…</div>
+  </div>
+
+  <main>
+    <div class="config" id="configRow">
+      <label for="signalUrl">Signaling server</label>
+      <input id="signalUrl" type="text" placeholder="wss://your-app.onrender.com" autocomplete="off">
+      <button id="saveUrlBtn" class="secondary">Save</button>
+    </div>
+
+    <div class="stage">
+      <video id="preview" autoplay muted playsinline></video>
+      <div class="placeholder" id="placeholder">
+        Nothing shared yet.<br>Click "Start sharing" and pick a screen or window.
+      </div>
+    </div>
+
+    <div>
+      <button id="startBtn">Start sharing</button>
+      <button id="stopBtn" class="secondary" disabled>Stop</button>
+    </div>
+
+    <div class="urlbox" id="viewerUrl">viewer link loading…</div>
+    <div class="viewers" id="viewerCount">0 devices watching</div>
+    <div class="footer-note">
+      Keep this tab open while sharing. Viewers on the same network open the link
+      above in any browser — nothing to install. Video never leaves your local network.
+    </div>
+  </main>
+
+<script>
+const dot = document.getElementById('dot');
+const wsStatus = document.getElementById('wsStatus');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const preview = document.getElementById('preview');
+const placeholder = document.getElementById('placeholder');
+const viewerUrlBox = document.getElementById('viewerUrl');
+const viewerCountEl = document.getElementById('viewerCount');
+
+function updateViewerUrlBox() {
+  const url = signalUrlInput.value.trim();
+  const base = `${location.origin}${location.pathname.replace(/host\.html$/, '')}viewer.html`;
+  viewerUrlBox.textContent = url ? `${base}?signal=${encodeURIComponent(url)}` : base;
+}
+
+let ws;
+let localStream = null;
+const peers = new Map();       // viewerId -> RTCPeerConnection
+const knownViewers = new Set(); // viewerId, tracked even before sharing starts
+
+const signalUrlInput = document.getElementById('signalUrl');
+const saveUrlBtn = document.getElementById('saveUrlBtn');
+const STORAGE_KEY = 'screencast:signalUrl';
+
+function getSavedSignalUrl() {
+  try { return localStorage.getItem(STORAGE_KEY) || ''; } catch { return ''; }
+}
+function saveSignalUrl(url) {
+  try { localStorage.setItem(STORAGE_KEY, url); } catch {}
+}
+
+signalUrlInput.value = getSavedSignalUrl();
+updateViewerUrlBox();
+signalUrlInput.addEventListener('input', updateViewerUrlBox);
+saveUrlBtn.addEventListener('click', () => {
+  saveSignalUrl(signalUrlInput.value.trim());
+  updateViewerUrlBox();
+  wsStatus.textContent = 'reconnecting to new server…';
+  if (ws) ws.close();
+  connectWS();
+});
+
+function setDot(state) {
+  dot.className = 'dot' + (state === 'live' ? ' live' : state === 'wait' ? ' wait' : '');
+}
+
+function connectWS() {
+  const url = signalUrlInput.value.trim();
+  if (!url) {
+    wsStatus.textContent = 'enter a signaling server URL above';
+    setDot('off');
+    return;
+  }
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    wsStatus.textContent = 'signaling connected';
+    ws.send(JSON.stringify({ type: 'register-host' }));
+  };
+  ws.onclose = () => {
+    if (!signalUrlInput.value.trim()) return;
+    wsStatus.textContent = 'signaling disconnected — retrying…';
+    setTimeout(connectWS, 1500);
+  };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === 'viewer-join') {
+      knownViewers.add(msg.id);
+      if (localStream) createPeerFor(msg.id);
+      updateViewerCount();
+    } else if (msg.type === 'viewer-leave') {
+      knownViewers.delete(msg.id);
+      const pc = peers.get(msg.id);
+      if (pc) { pc.close(); peers.delete(msg.id); }
+      updateViewerCount();
+    } else if (msg.type === 'answer') {
+      const pc = peers.get(msg.from);
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+    } else if (msg.type === 'ice-candidate') {
+      const pc = peers.get(msg.from);
+      if (pc && msg.candidate) {
+        try { await pc.addIceCandidate(msg.candidate); } catch (e) { console.warn(e); }
+      }
+    }
+  };
+}
+
+function updateViewerCount() {
+  const n = peers.size;
+  viewerCountEl.textContent = `${n} device${n === 1 ? '' : 's'} watching`;
+}
+
+async function createPeerFor(viewerId) {
+  const pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+  peers.set(viewerId, pc);
+
+  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      ws.send(JSON.stringify({ type: 'ice-candidate', to: viewerId, candidate: e.candidate }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+      peers.delete(viewerId);
+      updateViewerCount();
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'offer', to: viewerId, offer }));
+  updateViewerCount();
+}
+
+startBtn.addEventListener('click', async () => {
+  try {
+    localStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 30 },
+      audio: false
+    });
+  } catch (err) {
+    alert('Screen share was cancelled or blocked: ' + err.message);
+    return;
+  }
+
+  preview.srcObject = localStream;
+  placeholder.style.display = 'none';
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  setDot('live');
+
+  // Connect any viewers that were already waiting before sharing started.
+  for (const id of knownViewers) {
+    if (!peers.has(id)) createPeerFor(id);
+  }
+
+  localStream.getVideoTracks()[0].addEventListener('ended', stopSharing);
+});
+
+function stopSharing() {
+  if (localStream) {
+    localStream.getTracks().forEach((t) => t.stop());
+    localStream = null;
+  }
+  preview.srcObject = null;
+  placeholder.style.display = 'block';
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  setDot('wait');
+  for (const pc of peers.values()) pc.close();
+  peers.clear();
+  updateViewerCount();
+}
+
+stopBtn.addEventListener('click', stopSharing);
+
+setDot('wait');
+connectWS();
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>
