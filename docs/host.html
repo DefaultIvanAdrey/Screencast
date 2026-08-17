@@ -11,13 +11,16 @@
 <body>
   <div class="topbar">
     <div class="brand"><span class="dot" id="dot"></span><b>SCREENCAST</b> · broadcast</div>
-    <div class="status" id="wsStatus">connecting…</div>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <div class="status" id="wsStatus">connecting…</div>
+      <button id="retryBtn" class="secondary" style="display:none; padding:6px 12px; font-size:12px;">Retry now</button>
+    </div>
   </div>
 
   <main>
     <div class="config" id="configRow">
       <label for="signalUrl">Signaling server</label>
-      <input id="signalUrl" type="text" placeholder="wss://localwebstream.onrender.com" autocomplete="off">
+      <input id="signalUrl" type="text" placeholder="wss://your-app.onrender.com" autocomplete="off">
       <button id="saveUrlBtn" class="secondary">Save</button>
     </div>
 
@@ -27,6 +30,8 @@
         <option value="latency">Low latency (60fps, 4 Mbps)</option>
         <option value="balanced" selected>Balanced (60fps, 8 Mbps)</option>
         <option value="quality">High quality (60fps, 15 Mbps)</option>
+        <option value="high50">Very high (60fps, 50 Mbps)</option>
+        <option value="max100">Maximum (60fps, 100 Mbps)</option>
       </select>
     </div>
 
@@ -60,6 +65,7 @@
 <script>
 const dot = document.getElementById('dot');
 const wsStatus = document.getElementById('wsStatus');
+const retryBtn = document.getElementById('retryBtn');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const preview = document.getElementById('preview');
@@ -74,9 +80,11 @@ function updateViewerUrlBox() {
 }
 
 const QUALITY_PRESETS = {
-  latency:  { maxBitrate: 4_000_000,  maxFramerate: 60, degradationPreference: 'maintain-framerate' },
-  balanced: { maxBitrate: 8_000_000,  maxFramerate: 60, degradationPreference: 'maintain-framerate' },
-  quality:  { maxBitrate: 15_000_000, maxFramerate: 60, degradationPreference: 'maintain-resolution' }
+  latency:  { maxBitrate: 4_000_000,   maxFramerate: 60, degradationPreference: 'maintain-framerate' },
+  balanced: { maxBitrate: 8_000_000,   maxFramerate: 60, degradationPreference: 'maintain-framerate' },
+  quality:  { maxBitrate: 15_000_000,  maxFramerate: 60, degradationPreference: 'maintain-resolution' },
+  high50:   { maxBitrate: 50_000_000,  maxFramerate: 60, degradationPreference: 'maintain-resolution' },
+  max100:   { maxBitrate: 100_000_000, maxFramerate: 60, degradationPreference: 'maintain-resolution' }
 };
 const qualitySelect = document.getElementById('qualityPreset');
 
@@ -158,23 +166,75 @@ function setDot(state) {
   dot.className = 'dot' + (state === 'live' ? ' live' : state === 'wait' ? ' wait' : '');
 }
 
+let retryAttempt = 0;
+let retryTimer = null;
+let connectingTimer = null;
+
+function stopTimers() {
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  if (connectingTimer) { clearInterval(connectingTimer); connectingTimer = null; }
+}
+
+function scheduleRetry() {
+  retryBtn.style.display = 'inline-block';
+  retryAttempt++;
+  // Fast backoff: 1s, 2s, 3s, capped at 5s — not a slow fixed 1.5s every time.
+  const delaySec = Math.min(1 + retryAttempt, 5);
+  let remaining = delaySec;
+  wsStatus.textContent = `disconnected — retrying in ${remaining}s`;
+  retryTimer = setInterval(() => {
+    remaining--;
+    if (remaining <= 0) {
+      clearInterval(retryTimer);
+      retryTimer = null;
+      connectWS();
+    } else {
+      wsStatus.textContent = `disconnected — retrying in ${remaining}s`;
+    }
+  }, 1000);
+}
+
+retryBtn.addEventListener('click', () => {
+  stopTimers();
+  connectWS();
+});
+
 function connectWS() {
+  stopTimers();
   const url = signalUrlInput.value.trim();
   if (!url) {
     wsStatus.textContent = 'enter a signaling server URL above';
+    retryBtn.style.display = 'none';
     setDot('off');
     return;
   }
+
+  retryBtn.style.display = 'none';
+  let elapsed = 0;
+  wsStatus.textContent = 'connecting…';
+  connectingTimer = setInterval(() => {
+    elapsed++;
+    // Honest status: we genuinely don't know a % complete for a WebSocket
+    // handshake, so we show real elapsed time instead of faking a progress bar.
+    // Render's free tier can take 30-50s to wake from a cold start.
+    let note = '';
+    if (elapsed > 8) note = ' (free hosting can take up to ~50s to wake up)';
+    wsStatus.textContent = `connecting… ${elapsed}s${note}`;
+  }, 1000);
+
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    stopTimers();
+    retryAttempt = 0;
+    retryBtn.style.display = 'none';
     wsStatus.textContent = 'signaling connected';
     ws.send(JSON.stringify({ type: 'register-host' }));
   };
   ws.onclose = () => {
+    stopTimers();
     if (!signalUrlInput.value.trim()) return;
-    wsStatus.textContent = 'signaling disconnected — retrying…';
-    setTimeout(connectWS, 1500);
+    scheduleRetry();
   };
   ws.onerror = () => ws.close();
 
@@ -252,8 +312,8 @@ startBtn.addEventListener('click', async () => {
     localStream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         frameRate: { ideal: 60, max: 60 },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
+        width: { ideal: 3840 },
+        height: { ideal: 2160 }
       },
       audio: false
     });
