@@ -45,12 +45,34 @@ outbound connections, which every OS allows by default.
 1. On the broadcasting device, open your GitHub Pages `host.html` URL.
 2. Paste your Render signaling URL (`wss://...`) into the **Signaling
    server** field at the top and click **Save**.
-3. Click **Start sharing** and pick a screen/window.
-4. Copy the viewer link shown on the page (it automatically includes the
+3. Pick a **Quality** preset (Low latency / Balanced / High quality — all
+   target 60fps; the difference is bitrate and how the encoder trades
+   resolution vs framerate under load).
+4. Click **Start sharing** and pick a screen/window.
+5. Copy the viewer link shown on the page (it automatically includes the
    signaling server as a `?signal=` parameter, so viewers don't have to
    type anything) and send it to the other devices.
-5. On any other device, open that link in a browser — no install, and it
-   connects automatically.
+6. On any other device, open that link in a browser — no install, and it
+   connects automatically. If a "Take control" button appears, they can
+   click it to forward their mouse/keyboard to your machine (see
+   `input-helper/README.md` to enable that on your end).
+
+## Quality, latency, and remote control
+
+- **60fps / higher bitrate:** `host.html` now requests 60fps capture and
+  applies bitrate/framerate encoding parameters per the selected quality
+  preset (4–15 Mbps). You can switch presets live while sharing.
+- **Lower latency:** the viewer trims WebRTC's jitter buffer
+  (`playoutDelayHint = 0`) and the video track is tagged `contentHint =
+  'motion'` so the encoder favors framerate/motion smoothness over fine
+  detail — closer to how game-streaming tools tune video.
+- **Remote control (cloud-gaming style input forwarding):** a WebRTC data
+  channel forwards mouse/keyboard events from any viewer that clicks "Take
+  control" back to the host. Actually *acting* on those events on the host
+  OS requires the small native `input-helper` program (see
+  `input-helper/README.md`) — a browser tab alone cannot inject system
+  input, so this is the one piece that needs installing, and only on the
+  host machine.
 
 ## Notes
 

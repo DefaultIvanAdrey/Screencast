@@ -17,8 +17,24 @@
   <main>
     <div class="config" id="configRow">
       <label for="signalUrl">Signaling server</label>
-      <input id="signalUrl" type="text" placeholder="wss://localwebstream.onrender.com" autocomplete="off">
+      <input id="signalUrl" type="text" placeholder="wss://your-app.onrender.com" autocomplete="off">
       <button id="saveUrlBtn" class="secondary">Save</button>
+    </div>
+
+    <div class="config">
+      <label for="qualityPreset">Quality</label>
+      <select id="qualityPreset">
+        <option value="latency">Low latency (60fps, 4 Mbps)</option>
+        <option value="balanced" selected>Balanced (60fps, 8 Mbps)</option>
+        <option value="quality">High quality (60fps, 15 Mbps)</option>
+      </select>
+    </div>
+
+    <div class="config">
+      <label for="controlToggle">Remote control</label>
+      <input type="checkbox" id="controlToggle">
+      <input id="helperUrl" type="text" placeholder="ws://localhost:5900" autocomplete="off" style="max-width:180px;">
+      <span id="controlStatus" style="color:var(--dim);">off</span>
     </div>
 
     <div class="stage">
@@ -56,6 +72,60 @@ function updateViewerUrlBox() {
   const base = `${location.origin}${location.pathname.replace(/host\.html$/, '')}viewer.html`;
   viewerUrlBox.textContent = url ? `${base}?signal=${encodeURIComponent(url)}` : base;
 }
+
+const QUALITY_PRESETS = {
+  latency:  { maxBitrate: 4_000_000,  maxFramerate: 60, degradationPreference: 'maintain-framerate' },
+  balanced: { maxBitrate: 8_000_000,  maxFramerate: 60, degradationPreference: 'maintain-framerate' },
+  quality:  { maxBitrate: 15_000_000, maxFramerate: 60, degradationPreference: 'maintain-resolution' }
+};
+const qualitySelect = document.getElementById('qualityPreset');
+
+const controlToggle = document.getElementById('controlToggle');
+const helperUrlInput = document.getElementById('helperUrl');
+const controlStatus = document.getElementById('controlStatus');
+let helperWs = null;
+
+function currentQuality() {
+  return QUALITY_PRESETS[qualitySelect.value] || QUALITY_PRESETS.balanced;
+}
+
+async function applyEncodingParams(pc) {
+  const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+  if (!sender) return;
+  const q = currentQuality();
+  const params = sender.getParameters();
+  if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+  params.encodings[0].maxBitrate = q.maxBitrate;
+  params.encodings[0].maxFramerate = q.maxFramerate;
+  params.encodings[0].scaleResolutionDownBy = 1;
+  params.degradationPreference = q.degradationPreference;
+  try { await sender.setParameters(params); } catch (e) { console.warn('setParameters failed', e); }
+}
+
+function connectHelper() {
+  const url = helperUrlInput.value.trim() || 'ws://localhost:5900';
+  helperWs = new WebSocket(url);
+  helperWs.onopen = () => { controlStatus.textContent = 'connected'; controlStatus.style.color = 'var(--signal)'; };
+  helperWs.onclose = () => {
+    controlStatus.textContent = 'helper not reachable';
+    controlStatus.style.color = 'var(--off)';
+    helperWs = null;
+  };
+  helperWs.onerror = () => { if (helperWs) helperWs.close(); };
+}
+
+controlToggle.addEventListener('change', () => {
+  if (controlToggle.checked) {
+    controlStatus.textContent = 'connecting…';
+    controlStatus.style.color = 'var(--warn)';
+    connectHelper();
+  } else {
+    if (helperWs) helperWs.close();
+    helperWs = null;
+    controlStatus.textContent = 'off';
+    controlStatus.style.color = 'var(--dim)';
+  }
+});
 
 let ws;
 let localStream = null;
@@ -143,7 +213,19 @@ async function createPeerFor(viewerId) {
   });
   peers.set(viewerId, pc);
 
-  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  localStream.getTracks().forEach((t) => {
+    if (t.kind === 'video') t.contentHint = 'motion';
+    pc.addTrack(t, localStream);
+  });
+
+  // Input channel: viewer -> host mouse/keyboard events, relayed to the
+  // local input-helper if remote control is enabled.
+  const inputChannel = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+  inputChannel.onmessage = (e) => {
+    if (controlToggle.checked && helperWs && helperWs.readyState === WebSocket.OPEN) {
+      helperWs.send(e.data);
+    }
+  };
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
@@ -162,12 +244,17 @@ async function createPeerFor(viewerId) {
   await pc.setLocalDescription(offer);
   ws.send(JSON.stringify({ type: 'offer', to: viewerId, offer }));
   updateViewerCount();
+  await applyEncodingParams(pc);
 }
 
 startBtn.addEventListener('click', async () => {
   try {
     localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 30 },
+      video: {
+        frameRate: { ideal: 60, max: 60 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
       audio: false
     });
   } catch (err) {
@@ -205,6 +292,10 @@ function stopSharing() {
 }
 
 stopBtn.addEventListener('click', stopSharing);
+
+qualitySelect.addEventListener('change', () => {
+  for (const pc of peers.values()) applyEncodingParams(pc);
+});
 
 setDot('wait');
 connectWS();

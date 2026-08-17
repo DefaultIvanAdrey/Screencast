@@ -1,0 +1,16 @@
+{
+  "name": "screencast-input-helper",
+  "version": "1.0.0",
+  "description": "Local OS-level input simulator for the Screencast host machine",
+  "main": "input-helper.js",
+  "scripts": {
+    "start": "node input-helper.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "ws": "^8.18.0"
+  }
+}

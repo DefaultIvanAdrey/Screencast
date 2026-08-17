@@ -20,10 +20,11 @@
       <button id="saveUrlBtn" class="secondary">Connect</button>
     </div>
 
-    <div class="stage">
+    <div class="stage" id="stage">
       <video id="remote" autoplay playsinline></video>
       <div class="placeholder" id="placeholder">Waiting for the host to start sharing…</div>
     </div>
+    <button id="controlBtn" class="secondary" style="display:none;">Take control</button>
     <div class="footer-note">
       You're watching a live local screen share. Nothing was installed —
       this is just a browser tab.
@@ -119,6 +120,19 @@ async function handleOffer(offer) {
     placeholder.style.display = 'none';
     setDot('live');
     wsStatus.textContent = 'live';
+
+    // Trim the jitter buffer for lower end-to-end latency (Chrome/Edge).
+    for (const receiver of pc.getReceivers()) {
+      if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
+    }
+  };
+
+  pc.ondatachannel = (e) => {
+    if (e.channel.label === 'input') {
+      inputChannel = e.channel;
+      inputChannel.onopen = () => { controlBtn.style.display = 'inline-block'; };
+      inputChannel.onclose = () => { controlBtn.style.display = 'none'; setControlActive(false); };
+    }
   };
 
   pc.onicecandidate = (e) => {
@@ -146,7 +160,72 @@ function teardown() {
   placeholder.textContent = 'Waiting for the host to start sharing…';
   setDot('wait');
   wsStatus.textContent = 'waiting for stream…';
+  controlBtn.style.display = 'none';
+  setControlActive(false);
+  inputChannel = null;
 }
+
+// --- Remote control (mouse/keyboard forwarding) ---
+const stage = document.getElementById('stage');
+const controlBtn = document.getElementById('controlBtn');
+let inputChannel = null;
+let controlActive = false;
+
+function setControlActive(on) {
+  controlActive = on;
+  controlBtn.textContent = on ? 'Release control (Esc)' : 'Take control';
+  stage.style.outline = on ? '2px solid var(--signal)' : 'none';
+  if (on) stage.setAttribute('tabindex', '0'), stage.focus();
+}
+
+controlBtn.addEventListener('click', () => setControlActive(!controlActive));
+
+function sendInput(msg) {
+  if (inputChannel && inputChannel.readyState === 'open') {
+    inputChannel.send(JSON.stringify(msg));
+  }
+}
+
+function relCoords(e) {
+  const rect = remote.getBoundingClientRect();
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+    y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
+  };
+}
+
+stage.addEventListener('mousemove', (e) => {
+  if (!controlActive) return;
+  sendInput({ type: 'mousemove', ...relCoords(e) });
+});
+stage.addEventListener('mousedown', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+  sendInput({ type: 'mousedown', button: e.button, ...relCoords(e) });
+});
+stage.addEventListener('mouseup', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+  sendInput({ type: 'mouseup', button: e.button, ...relCoords(e) });
+});
+stage.addEventListener('wheel', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+  sendInput({ type: 'wheel', deltaY: e.deltaY });
+}, { passive: false });
+stage.addEventListener('contextmenu', (e) => { if (controlActive) e.preventDefault(); });
+
+stage.addEventListener('keydown', (e) => {
+  if (!controlActive) return;
+  if (e.key === 'Escape') { setControlActive(false); return; }
+  e.preventDefault();
+  sendInput({ type: 'keydown', key: e.key });
+});
+stage.addEventListener('keyup', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+  sendInput({ type: 'keyup', key: e.key });
+});
 
 setDot('off');
 connectWS();
